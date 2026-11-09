@@ -1,0 +1,1292 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d0d12">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Chato">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Chato el Perro Dragón</title>
+<script>
+// Registrar Service Worker para PWA offline
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('./sw.js')
+      .then(function(reg) { console.log('SW registrado:', reg.scope); })
+      .catch(function(err) { console.log('SW error:', err); });
+  });
+}
+// Banner de instalación PWA
+var deferredPrompt;
+window.addEventListener('beforeinstallprompt', function(e) {
+  e.preventDefault();
+  deferredPrompt = e;
+  var btn = document.getElementById('installBtn');
+  if (btn) btn.style.display = 'block';
+});
+window.addEventListener('appinstalled', function() {
+  var btn = document.getElementById('installBtn');
+  if (btn) btn.style.display = 'none';
+  deferredPrompt = null;
+});
+function installApp() {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  deferredPrompt.userChoice.then(function() { deferredPrompt = null; });
+}
+</script>
+<style>
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #0d0d12;
+    touch-action: none; -webkit-tap-highlight-color: transparent;
+    font-family: 'Trebuchet MS', Verdana, sans-serif;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #0d0d12;
+  }
+  #game {
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    display: block;
+    background: #7ec8e3;
+    touch-action: none;
+    box-shadow: 0 0 0 2px #000, 0 10px 40px rgba(0,0,0,0.6);
+  }
+  #jumpBtn {
+    position: fixed;
+    left: 22%; bottom: 18px;
+    transform: translateX(-50%);
+    width: 110px; height: 50px;
+    border-radius: 25px;
+    border: 3px solid rgba(255,255,255,0.85);
+    background: linear-gradient(180deg, #ff9d4d, #e3823c);
+    color: #2b1d12;
+    font-size: 14px; font-weight: bold;
+    letter-spacing: 1px;
+    box-shadow: 0 4px 0 rgba(0,0,0,0.35), 0 6px 14px rgba(0,0,0,0.4);
+    z-index: 5;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #jumpBtn:active { transform: translateX(-50%) translateY(3px); box-shadow: 0 1px 0 rgba(0,0,0,0.35); }
+  #fireBtn {
+    position: fixed;
+    left: 78%; bottom: 18px;
+    transform: translateX(-50%);
+    width: 110px; height: 50px;
+    border-radius: 25px;
+    border: 3px solid rgba(255,255,255,0.85);
+    background: linear-gradient(180deg, #ff5d3d, #b3271a);
+    color: #fff6e0;
+    font-size: 14px; font-weight: bold;
+    letter-spacing: 1px;
+    box-shadow: 0 4px 0 rgba(0,0,0,0.35), 0 6px 14px rgba(0,0,0,0.4);
+    z-index: 5;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    transition: opacity 0.15s linear;
+  }
+  #fireBtn:active { transform: translateX(-50%) translateY(3px); box-shadow: 0 1px 0 rgba(0,0,0,0.35); }
+  #fireBtn.cooldown { opacity: 0.45; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <button id="jumpBtn" aria-label="Saltar">⬆ SALTAR</button>
+  <button id="fireBtn" aria-label="Botar fuego">🔥 FUEGO</button>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ----------------------------------------------------------------
+  // CONFIGURACIÓN BASE - HORIZONTAL (landscape)
+  // ----------------------------------------------------------------
+  var GAME_W = 480, GAME_H = 270;   // formato 16:9 horizontal
+  var GROUND_H = 42;
+  var GROUND_Y = GAME_H - GROUND_H;
+  var CEIL_Y = 14;  // techo: por encima de este Y rebota (no muere)
+
+  var GRAVITY = 750;
+  var JUMP_V = -270;
+  var MAX_FALL = 340;
+
+  var BASE_SPEED = 68;
+  var MAX_SPEED = 155;
+  var SPEED_GROWTH = 0.9;
+
+  var PIPE_GAP = 120;
+  var PIPE_W = 32;
+  var PIPE_SPACING = 200;
+
+  var ESCOBA_MAX = 2;
+  var ESCOBA_EASE_SECONDS = 18;
+  var ESCOBA_SPEED_MIN_MULT = 0.8;
+  var ESCOBA_SPEED_MAX_MULT = 1.35;
+  var ESCOBA_RAMP_SECONDS = 26;
+
+  var HITBOX_MARGIN = 4;
+
+  var FIRE_COOLDOWN_MAX = 1.1;
+  var FIRE_SPEED = 340;
+  var FIRE_BREATH_TIME = 0.28;
+  var FIRE_HIT_RX = 20, FIRE_HIT_RY = 16;
+
+  // Cada 7 niveles cambia de escenario
+  var SCENARIO_LEVELS = 7;
+
+  var RESTART_COOLDOWN = 450;
+
+  // ----------------------------------------------------------------
+  // TEMAS DE ESCENARIO
+  // ----------------------------------------------------------------
+  var THEMES = [
+    { // 0. URBANO (pixel art city adobe style)
+      name: "Urbano",
+      sky: ["#7fa8c9", "#cfe4ef"],
+      decorColor: "#5a6b7d",
+      groundColor: "#6a6060",
+      groundLineColor: "#f0d23e",
+      obstacleType: "poste",
+      obstacleAccent: "#f2b630",
+      obstacleAccentDark: "#7a4d0d"
+    },
+    { // 1. MONTAÑA
+      name: "Montaña",
+      sky: ["#4f6088", "#9fb3d6"],
+      decorColor: "#384361",
+      groundColor: "#6b5238",
+      groundLineColor: "#46361f",
+      obstacleType: "pico",
+      obstacleColor: "#8a7259",
+      obstacleAccent: "#c0392b",
+      obstacleAccentDark: "#6e1d14"
+    },
+    { // 2. PLAYA
+      name: "Playa",
+      sky: ["#8fd4ec", "#fff0c2"],
+      decorColor: "#1f7fa3",
+      groundColor: "#e8cf95",
+      groundLineColor: "#cfa860",
+      obstacleType: "ola",
+      obstacleColor: "#3aa0d1",
+      obstacleAccent: "#ff6f59",
+      obstacleAccentDark: "#9c2f22"
+    },
+    { // 3. HUANCHACO - Caballitos de Totora
+      name: "Huanchaco",
+      sky: ["#6fb8d9", "#cdeaf2"],
+      decorColor: "#1f9aa8",
+      groundColor: "#e3c481",
+      groundLineColor: "#cfa860",
+      obstacleType: "totora",
+      obstacleColor: "#b6864a",
+      obstacleAccent: "#e0a857",
+      obstacleAccentDark: "#5c3a1e"
+    },
+    { // 4. CHAN CHAN - Ciudadela pixel art adobe
+      name: "Chan Chan",
+      sky: ["#f0cfa0", "#fbe9c8"],
+      decorColor: "#c2884e",
+      groundColor: "#dcb877",
+      groundLineColor: "#b8895a",
+      obstacleType: "adobe",
+      obstacleColor: "#d3a567",
+      obstacleAccent: "#a97240",
+      obstacleAccentDark: "#6e4926"
+    },
+    { // 5. PLAZA DE ARMAS
+      name: "Plaza de Armas",
+      sky: ["#5fa8d3", "#bfe3f0"],
+      decorColor: "#e8a73c",
+      groundColor: "#d9b27a",
+      groundLineColor: "#b8895a",
+      obstacleType: "colonial",
+      obstacleColor: "#2b2b2b",
+      obstacleAccent: "#e8a73c",
+      obstacleAccentDark: "#171717"
+    },
+    { // 6. HUACAS DEL SOL Y DE LA LUNA (pirámides pixel art)
+      name: "Huacas",
+      sky: ["#f0b15c", "#fbe2b0"],
+      decorColor: "#c1652f",
+      groundColor: "#e3c481",
+      groundLineColor: "#c79552",
+      obstacleType: "huaca",
+      obstacleColor: "#c1652f",
+      obstacleAccent: "#e0985a",
+      obstacleAccentDark: "#7a3d18"
+    }
+  ];
+
+  // ----------------------------------------------------------------
+  // CANVAS Y ESCALADO
+  // ----------------------------------------------------------------
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  canvas.width = GAME_W;
+  canvas.height = GAME_H;
+
+  function resize() {
+    var scaleW = window.innerWidth / GAME_W;
+    var scaleH = (window.innerHeight - 80) / GAME_H; // dejar espacio para botones
+    var scale = Math.min(scaleW, scaleH);
+    scale = Math.max(scale, 0.5);
+    canvas.style.width = Math.floor(GAME_W * scale) + "px";
+    canvas.style.height = Math.floor(GAME_H * scale) + "px";
+  }
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", resize);
+  resize();
+
+  // ----------------------------------------------------------------
+  // AUDIO
+  // ----------------------------------------------------------------
+  var actx = null;
+  function ensureAudio() {
+    if (!actx) {
+      try { actx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) {}
+    } else if (actx.state === "suspended") {
+      actx.resume();
+    }
+  }
+  function beep(freq, duration, type, vol) {
+    if (!actx) return;
+    try {
+      var osc = actx.createOscillator();
+      var gain = actx.createGain();
+      osc.type = type || "sine";
+      osc.frequency.value = freq;
+      var t = actx.currentTime;
+      gain.gain.setValueAtTime(vol || 0.12, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+      osc.connect(gain); gain.connect(actx.destination);
+      osc.start(t); osc.stop(t + duration);
+    } catch (e) {}
+  }
+
+  // ----------------------------------------------------------------
+  // ESTADO DEL JUEGO
+  // ----------------------------------------------------------------
+  var state = "start";
+  var score = 0, best = 0;
+  var scenarioIndex = 0;
+  var elapsedPlaying = 0;
+  var speed = BASE_SPEED;
+  var scrollX = 0;
+  var distanceSinceSpawn = 0;
+  var pipes = [];
+  var escobas = [];
+  var escobaSpawnTimer = 1.5;
+  var fireballs = [];
+  var puffs = [];
+  var fireCooldown = 0;
+  var flapPhase = 0;
+  var gameOverTime = 0;
+  var flashAlpha = 0;
+  var ceilBounceFlash = 0; // efecto visual al rebotar en techo
+
+  var chato = { x: 80, y: 130, w: 22, h: 18, vy: 0, rot: 0, fireBreath: 0 };
+
+  // gente lanzando escobas (decoración en suelo)
+  var throwers = [];
+
+  function randRange(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function resetGame() {
+    score = 0;
+    scenarioIndex = 0;
+    elapsedPlaying = 0;
+    speed = BASE_SPEED;
+    scrollX = 0;
+    distanceSinceSpawn = 0;
+    pipes = [];
+    escobas = [];
+    escobaSpawnTimer = randRange(3.5, 5.0);
+    fireballs = [];
+    puffs = [];
+    fireCooldown = 0;
+    chato.x = 80; chato.y = 130; chato.vy = 0; chato.rot = 0; chato.fireBreath = 0;
+    flashAlpha = 0;
+    ceilBounceFlash = 0;
+    throwers = [];
+    // generar personas en suelo con posiciones distribuidas
+    for (var i = 0; i < 4; i++) {
+      throwers.push({
+        baseX: 300 + i * 280,
+        phase: Math.random() * Math.PI * 2,
+        throwing: false,
+        throwTimer: randRange(1.5, 3.5)
+      });
+    }
+  }
+
+  function jump() {
+    chato.vy = JUMP_V;
+    beep(520, 0.09, "square", 0.12);
+  }
+
+  function fireAbility() {
+    if (state !== "playing" || fireCooldown > 0) return;
+    fireCooldown = FIRE_COOLDOWN_MAX;
+    chato.fireBreath = FIRE_BREATH_TIME;
+    fireballs.push({ x: chato.x + 15, y: chato.y + 1, vx: FIRE_SPEED });
+    beep(300, 0.12, "sawtooth", 0.15);
+  }
+
+  function startGame() {
+    ensureAudio();
+    resetGame();
+    state = "playing";
+    jump();
+  }
+
+  function gameOver() {
+    state = "gameover";
+    gameOverTime = performance.now();
+    flashAlpha = 0.85;
+    if (score > best) best = score;
+    beep(160, 0.4, "sawtooth", 0.16);
+    if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
+  }
+
+  function handleInput() {
+    ensureAudio();
+    if (state === "start") {
+      startGame();
+    } else if (state === "playing") {
+      jump();
+    } else if (state === "gameover") {
+      if (performance.now() - gameOverTime > RESTART_COOLDOWN) {
+        startGame();
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // ENTRADA
+  // ----------------------------------------------------------------
+  function onPress(e) { e.preventDefault(); handleInput(); }
+  canvas.addEventListener("pointerdown", onPress, { passive: false });
+  document.getElementById("jumpBtn").addEventListener("pointerdown", onPress, { passive: false });
+
+  var fireBtnEl = document.getElementById("fireBtn");
+  function onFirePress(e) {
+    e.preventDefault();
+    ensureAudio();
+    fireAbility();
+  }
+  fireBtnEl.addEventListener("pointerdown", onFirePress, { passive: false });
+
+  window.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); handleInput(); }
+    else if (e.code === "KeyF" || e.code === "ArrowDown") { e.preventDefault(); ensureAudio(); fireAbility(); }
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) lastTime = performance.now();
+  });
+
+  // ----------------------------------------------------------------
+  // ACTUALIZACIÓN DE LÓGICA
+  // ----------------------------------------------------------------
+  function update(dt) {
+    elapsedPlaying += dt;
+    speed = Math.min(MAX_SPEED, BASE_SPEED + elapsedPlaying * SPEED_GROWTH);
+    scrollX += speed * dt;
+
+    // física de Chato
+    chato.vy += GRAVITY * dt;
+    if (chato.vy > MAX_FALL) chato.vy = MAX_FALL;
+    chato.y += chato.vy * dt;
+    chato.rot = clamp(chato.vy / MAX_FALL, -1, 1) * 0.5;
+    flapPhase += dt * 9;
+    fireCooldown = Math.max(0, fireCooldown - dt);
+    chato.fireBreath = Math.max(0, chato.fireBreath - dt);
+    ceilBounceFlash = Math.max(0, ceilBounceFlash - dt * 3);
+    fireBtnEl.classList.toggle("cooldown", fireCooldown > 0);
+
+    // TECHO: rebota, NO pierde
+    if (chato.y - chato.h / 2 <= CEIL_Y) {
+      chato.y = CEIL_Y + chato.h / 2;
+      chato.vy = Math.abs(chato.vy) * 0.45; // rebote suave hacia abajo
+      ceilBounceFlash = 1.0;
+      beep(440, 0.06, "square", 0.08);
+    }
+
+    // SUELO: sí pierde
+    if (chato.y + chato.h / 2 - HITBOX_MARGIN >= GROUND_Y) {
+      gameOver(); return;
+    }
+
+    // generación de obstáculos
+    distanceSinceSpawn += speed * dt;
+    if (distanceSinceSpawn >= PIPE_SPACING) {
+      distanceSinceSpawn = 0;
+      var minGapY = CEIL_Y + 30, maxGapY = GROUND_Y - 30 - PIPE_GAP;
+      var gapY = randRange(minGapY, maxGapY);
+      pipes.push({ x: GAME_W + PIPE_W, gapY: gapY, theme: scenarioIndex, passed: false, hp: 1 });
+    }
+    for (var i = 0; i < pipes.length; i++) pipes[i].x -= speed * dt;
+    pipes = pipes.filter(function (p) { return p.x > -PIPE_W - 4; });
+
+    // generación de escobas
+    var escobaMaxNow = elapsedPlaying < ESCOBA_EASE_SECONDS ? 1 : ESCOBA_MAX;
+    escobaSpawnTimer -= dt;
+    if (escobaSpawnTimer <= 0 && escobas.length < escobaMaxNow) {
+      // Las escobas vienen desde el fondo (gente que las avienta), empiezan en el suelo
+      var throwX = GAME_W + 30;
+      var throwerIdx = Math.floor(Math.random() * throwers.length);
+      escobas.push({
+        x: throwX,
+        baseY: randRange(55, GROUND_Y - 55),
+        phase: Math.random() * Math.PI * 2,
+        amp: randRange(22, 42),
+        theme: scenarioIndex,
+        throwerIdx: throwerIdx
+      });
+      // activar animación del lanzador
+      if (throwers[throwerIdx]) {
+        throwers[throwerIdx].throwing = true;
+        throwers[throwerIdx].throwTimer = randRange(1.8, 3.2);
+      }
+      escobaSpawnTimer = randRange(1.8, 2.8);
+    }
+
+    // actualizar lanzadores
+    for (var ti = 0; ti < throwers.length; ti++) {
+      var th = throwers[ti];
+      th.baseX -= speed * dt;
+      // reaparecen al salir de pantalla
+      if (th.baseX < -40) th.baseX += GAME_W + 500;
+      th.throwTimer -= dt;
+      if (th.throwTimer <= 0) {
+        th.throwing = false;
+        th.throwTimer = randRange(2.0, 4.5);
+      }
+    }
+
+    var escobaRampT = clamp(elapsedPlaying / ESCOBA_RAMP_SECONDS, 0, 1);
+    var escobaSpeedMult = ESCOBA_SPEED_MIN_MULT + escobaRampT * (ESCOBA_SPEED_MAX_MULT - ESCOBA_SPEED_MIN_MULT);
+    for (var j = 0; j < escobas.length; j++) {
+      var es = escobas[j];
+      es.x -= speed * escobaSpeedMult * dt;
+      es.phase += dt * 1.9;
+      es.y = clamp(es.baseY + Math.sin(es.phase) * es.amp, CEIL_Y + 18, GROUND_Y - 22);
+    }
+    escobas = escobas.filter(function (es) { return es.x > -60; });
+
+    // bolas de fuego: colisión con escobas Y postes
+    for (var fi = fireballs.length - 1; fi >= 0; fi--) {
+      var fb = fireballs[fi];
+      fb.x += fb.vx * dt;
+      var hit = false;
+
+      // colisión con escobas
+      for (var ai = escobas.length - 1; ai >= 0; ai--) {
+        var es2 = escobas[ai];
+        if (Math.abs(fb.x - es2.x) < FIRE_HIT_RX && Math.abs(fb.y - es2.y) < FIRE_HIT_RY) {
+          puffs.push({ x: es2.x, y: es2.y, t: 0, big: false });
+          escobas.splice(ai, 1);
+          hit = true;
+          beep(200, 0.12, "square", 0.14);
+          break;
+        }
+      }
+
+      // colisión con postes (solo obstacleType "poste" es destruible)
+      if (!hit) {
+        for (var pi2 = pipes.length - 1; pi2 >= 0; pi2--) {
+          var pp = pipes[pi2];
+          var theme2 = THEMES[pp.theme];
+          if (theme2.obstacleType === "poste") {
+            // el poste ocupa aprox el centro horizontal del pipe
+            var poleX = pp.x + PIPE_W / 2;
+            if (Math.abs(fb.x - poleX) < FIRE_HIT_RX + 6) {
+              // bola golpea el poste
+              puffs.push({ x: poleX, y: fb.y, t: 0, big: true });
+              pipes.splice(pi2, 1);
+              hit = true;
+              beep(160, 0.18, "sawtooth", 0.16);
+              break;
+            }
+          }
+        }
+      }
+
+      if (hit || fb.x > GAME_W + 16) fireballs.splice(fi, 1);
+    }
+
+    for (var pfi = puffs.length - 1; pfi >= 0; pfi--) {
+      puffs[pfi].t += dt;
+      if (puffs[pfi].t > 0.4) puffs.splice(pfi, 1);
+    }
+
+    // colisiones: caja de Chato
+    var cb = {
+      l: chato.x - chato.w / 2 + HITBOX_MARGIN, r: chato.x + chato.w / 2 - HITBOX_MARGIN,
+      t: chato.y - chato.h / 2 + HITBOX_MARGIN, b: chato.y + chato.h / 2 - HITBOX_MARGIN
+    };
+
+    for (var k = 0; k < pipes.length; k++) {
+      var p = pipes[k];
+      if (cb.r > p.x && cb.l < p.x + PIPE_W) {
+        if (cb.t < p.gapY || cb.b > p.gapY + PIPE_GAP) { gameOver(); return; }
+      }
+      if (!p.passed && p.x + PIPE_W < cb.l) {
+        p.passed = true;
+        score++;
+        // cambio de escenario cada 7 niveles (puntos)
+        scenarioIndex = Math.floor(score / SCENARIO_LEVELS) % THEMES.length;
+        beep(880, 0.1, "sine", 0.12);
+      }
+    }
+
+    for (var m = 0; m < escobas.length; m++) {
+      var es3 = escobas[m];
+      if (cb.r > es3.x - 22 && cb.l < es3.x + 22 && cb.b > es3.y - 11 && cb.t < es3.y + 11) {
+        gameOver(); return;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: FONDOS
+  // ----------------------------------------------------------------
+  function drawSky(theme) {
+    var g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+    g.addColorStop(0, theme.sky[0]);
+    g.addColorStop(1, theme.sky[1]);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, GAME_W, GROUND_Y);
+
+    // línea de techo visible (para avisar al jugador)
+    if (ceilBounceFlash > 0) {
+      ctx.fillStyle = "rgba(255,220,80," + (ceilBounceFlash * 0.5) + ")";
+      ctx.fillRect(0, CEIL_Y - 2, GAME_W, 6);
+    }
+  }
+
+  function drawDecor(theme) {
+    var idx = THEMES.indexOf(theme);
+
+    if (idx === 0) {
+      // URBANO: ciudad de adobe pixel art, muros almenados con ventanas
+      var spacing = 80, offset = (scrollX * 0.3) % spacing;
+      for (var x = -spacing; x < GAME_W + spacing; x += spacing) {
+        var bx = x - offset;
+        var seed = ((Math.floor((x + 2000) / spacing)) % 5 + 5) % 5;
+        var bh = 45 + seed * 12;
+        var bw = 55 + seed * 4;
+        // edificio principal adobe
+        ctx.fillStyle = "#c8905a";
+        ctx.fillRect(bx, GROUND_Y - bh, bw, bh);
+        // detalle de ladrillos (pixel art)
+        ctx.fillStyle = "#b07840";
+        for (var row = 0; row < Math.floor(bh / 8); row++) {
+          var xoff = (row % 2) * 6;
+          for (var col = 0; col < Math.floor(bw / 12); col++) {
+            ctx.fillRect(bx + col * 12 + xoff + 1, GROUND_Y - bh + row * 8 + 1, 10, 6);
+          }
+        }
+        // almenas en la parte superior
+        ctx.fillStyle = "#c8905a";
+        ctx.fillRect(bx, GROUND_Y - bh - 5, bw, 5);
+        ctx.fillStyle = "#a06838";
+        for (var nz = 0; nz < Math.floor(bw / 10); nz++) {
+          ctx.fillRect(bx + nz * 10 + 1, GROUND_Y - bh - 10, 6, 5);
+        }
+        // ventanas rectangulares oscuras
+        ctx.fillStyle = "#3a2818";
+        for (var wy = GROUND_Y - bh + 10; wy < GROUND_Y - 12; wy += 16) {
+          ctx.fillRect(bx + 8, wy, 7, 9);
+          if (bw > 40) ctx.fillRect(bx + bw - 18, wy, 7, 9);
+        }
+        // arco de entrada al fondo
+        ctx.fillStyle = "#2a1a10";
+        ctx.beginPath();
+        ctx.arc(bx + bw / 2, GROUND_Y - 1, 9, Math.PI, 0, false);
+        ctx.rect(bx + bw / 2 - 9, GROUND_Y - 9, 18, 9);
+        ctx.fill();
+      }
+      // calles y postes en el fondo
+      var pSpacing = 120, pOff = (scrollX * 0.3) % pSpacing;
+      for (var px = -pSpacing; px < GAME_W + pSpacing; px += pSpacing) {
+        var pbx = px - pOff;
+        ctx.fillStyle = "#5a5055";
+        ctx.fillRect(pbx, GROUND_Y - 70, 5, 70);
+        ctx.fillStyle = "#777";
+        ctx.fillRect(pbx - 10, GROUND_Y - 70, 25, 6);
+        ctx.fillStyle = "#ffee88";
+        ctx.beginPath(); ctx.arc(pbx + 12, GROUND_Y - 68, 4, 0, Math.PI * 2); ctx.fill();
+      }
+
+    } else if (idx === 1) {
+      // montaña
+      var sp2 = 84, of2 = (scrollX * 0.25) % sp2;
+      ctx.fillStyle = theme.decorColor;
+      for (var x2 = -sp2; x2 < GAME_W + sp2; x2 += sp2) {
+        var bx2 = x2 - of2;
+        ctx.beginPath();
+        ctx.moveTo(bx2, GROUND_Y); ctx.lineTo(bx2 + sp2 / 2, GROUND_Y - 92); ctx.lineTo(bx2 + sp2, GROUND_Y);
+        ctx.closePath(); ctx.fill();
+      }
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      var cloff = (scrollX * 0.15) % 140;
+      for (var cx = -140; cx < GAME_W + 140; cx += 140) {
+        var ccx = cx - cloff;
+        ctx.beginPath(); ctx.ellipse(ccx + 30, 50, 22, 9, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(ccx + 50, 46, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
+      }
+
+    } else if (idx === 2) {
+      // playa
+      ctx.fillStyle = theme.decorColor;
+      ctx.fillRect(0, GROUND_Y - 60, GAME_W, 60);
+      ctx.fillStyle = "#ffe9a8";
+      ctx.beginPath(); ctx.arc(GAME_W - 60, 44, 18, 0, Math.PI * 2); ctx.fill();
+      var sp3 = 30, of3 = (scrollX * 0.5) % sp3;
+      ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (var x3 = -sp3; x3 < GAME_W + sp3; x3 += sp3) {
+        var bx3 = x3 - of3;
+        ctx.moveTo(bx3, GROUND_Y - 60 + 12);
+        ctx.quadraticCurveTo(bx3 + sp3 / 2, GROUND_Y - 60, bx3 + sp3, GROUND_Y - 60 + 12);
+      }
+      ctx.stroke();
+
+    } else if (idx === 3) {
+      // Huanchaco: palmeras y gaviotas
+      ctx.fillStyle = theme.decorColor;
+      ctx.fillRect(0, GROUND_Y - 60, GAME_W, 60);
+      ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 2;
+      var sp4 = 26, of4 = (scrollX * 0.45) % sp4;
+      ctx.beginPath();
+      for (var x4 = -sp4; x4 < GAME_W + sp4; x4 += sp4) {
+        var bx4 = x4 - of4;
+        ctx.moveTo(bx4, GROUND_Y - 60 + 10);
+        ctx.quadraticCurveTo(bx4 + sp4 / 2, GROUND_Y - 62, bx4 + sp4, GROUND_Y - 60 + 10);
+      }
+      ctx.stroke();
+      var palmSp = 110, palmOf = (scrollX * 0.3) % palmSp;
+      for (var xp = -palmSp; xp < GAME_W + palmSp; xp += palmSp) {
+        var bxp = xp - palmOf;
+        ctx.strokeStyle = "#8a6336"; ctx.lineWidth = 4; ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(bxp, GROUND_Y); ctx.quadraticCurveTo(bxp + 8, GROUND_Y - 42, bxp + 2, GROUND_Y - 60); ctx.stroke();
+        ctx.fillStyle = "#3f7d3f";
+        for (var fr = 0; fr < 5; fr++) {
+          var ang = fr / 5 * Math.PI * 2;
+          ctx.save(); ctx.translate(bxp + 2, GROUND_Y - 60); ctx.rotate(ang);
+          ctx.beginPath(); ctx.ellipse(8, 0, 11, 4, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+        }
+      }
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      var gulls = [[60, 38], [180, 55], [300, 30], [420, 48]];
+      for (var gi = 0; gi < gulls.length; gi++) {
+        var gx = gulls[gi][0] - (scrollX * 0.18) % (GAME_W + 80);
+        if (gx < -25) gx += GAME_W + 80;
+        var gy = gulls[gi][1];
+        ctx.beginPath(); ctx.moveTo(gx - 6, gy); ctx.quadraticCurveTo(gx, gy - 5, gx + 6, gy);
+        ctx.quadraticCurveTo(gx, gy - 2, gx - 6, gy); ctx.fill();
+      }
+
+    } else if (idx === 4) {
+      // CHAN CHAN pixel art: ciudad de adobe con muros almenados densos
+      var spc = 95, offc = (scrollX * 0.28) % spc;
+      for (var xc = -spc; xc < GAME_W + spc; xc += spc) {
+        var bxc = xc - offc;
+        var hc = 55;
+        // muro base de adobe estilo Chan Chan
+        ctx.fillStyle = "#d4a265";
+        ctx.fillRect(bxc, GROUND_Y - hc, 80, hc);
+        // textura de ladrillo adobe pixel art
+        ctx.fillStyle = "#b8884a";
+        for (var row2 = 0; row2 < Math.floor(hc / 9); row2++) {
+          var roff = (row2 % 2) * 7;
+          for (var col2 = 0; col2 < 6; col2++) {
+            ctx.fillRect(bxc + col2 * 13 + roff + 1, GROUND_Y - hc + row2 * 9 + 1, 11, 7);
+          }
+        }
+        // almenas superiores tipo Chan Chan
+        ctx.fillStyle = "#d4a265";
+        for (var nz2 = 0; nz2 < 8; nz2++) ctx.fillRect(bxc + nz2 * 10 + 1, GROUND_Y - hc - 8, 7, 8);
+        // diseño geométrico en relieve (característico Chan Chan)
+        ctx.strokeStyle = "#956030";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bxc + 10, GROUND_Y - hc + 18, 60, 22);
+        ctx.strokeRect(bxc + 18, GROUND_Y - hc + 22, 44, 14);
+        // abertura rectangular
+        ctx.fillStyle = "#4a2e14";
+        ctx.fillRect(bxc + 32, GROUND_Y - 10, 16, 10);
+      }
+      // cielo con tonos ocres
+      ctx.fillStyle = "rgba(180,130,60,0.12)";
+      ctx.fillRect(0, 0, GAME_W, GROUND_Y / 2);
+
+    } else if (idx === 5) {
+      // Plaza de Armas
+      var sp5 = 110, of5 = (scrollX * 0.25) % sp5;
+      for (var x5 = -sp5; x5 < GAME_W + sp5; x5 += sp5) {
+        var bx5 = x5 - of5;
+        ctx.fillStyle = theme.decorColor;
+        ctx.fillRect(bx5, GROUND_Y - 60, 75, 60);
+        ctx.fillStyle = "#b5512f";
+        ctx.fillRect(bx5 - 4, GROUND_Y - 66, 83, 8);
+        ctx.fillStyle = "#fff4d6";
+        for (var ww = 0; ww < 4; ww++) ctx.fillRect(bx5 + ww * 18 + 5, GROUND_Y - 48, 10, 14);
+      }
+      ctx.fillStyle = theme.decorColor;
+      ctx.fillRect(GAME_W / 2 - 12, GROUND_Y - 112, 24, 112);
+      ctx.beginPath();
+      ctx.moveTo(GAME_W / 2 - 14, GROUND_Y - 112);
+      ctx.lineTo(GAME_W / 2, GROUND_Y - 132);
+      ctx.lineTo(GAME_W / 2 + 14, GROUND_Y - 112);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#fff4d6";
+      ctx.fillRect(GAME_W / 2 - 5, GROUND_Y - 100, 10, 12);
+
+    } else {
+      // HUACAS: pirámides escalonadas pixel art
+      var sp6 = 160, of6 = (scrollX * 0.22) % sp6;
+      for (var x6 = -sp6; x6 < GAME_W + sp6; x6 += sp6) {
+        var bx6 = x6 - of6;
+        ctx.fillStyle = theme.decorColor;
+        var steps6 = 5;
+        for (var s = 0; s < steps6; s++) {
+          var sw = 100 - s * 16, sh = 12;
+          ctx.fillRect(bx6 + (100 - sw) / 2, GROUND_Y - (s + 1) * sh, sw, sh);
+          // detalle de línea entre escalones
+          ctx.fillStyle = theme.obstacleAccentDark;
+          ctx.fillRect(bx6 + (100 - sw) / 2, GROUND_Y - (s + 1) * sh, sw, 2);
+          ctx.fillStyle = theme.decorColor;
+        }
+        // escalera central
+        ctx.fillStyle = "#a05028";
+        for (var ss = 0; ss < steps6; ss++) {
+          ctx.fillRect(bx6 + 44, GROUND_Y - (ss + 1) * 12, 12, 11);
+          ctx.fillStyle = "#c07040";
+          ctx.fillRect(bx6 + 44, GROUND_Y - (ss + 1) * 12, 12, 2);
+          ctx.fillStyle = "#a05028";
+        }
+      }
+    }
+  }
+
+  function drawGround(theme) {
+    ctx.fillStyle = theme.groundColor;
+    ctx.fillRect(0, GROUND_Y, GAME_W, GROUND_H);
+    var idx = THEMES.indexOf(theme);
+    ctx.fillStyle = theme.groundLineColor;
+    if (idx === 0) {
+      // asfalto con líneas amarillas
+      var sp = 30, of = scrollX % sp;
+      for (var x = -sp; x < GAME_W + sp; x += sp) {
+        ctx.fillRect(x - of, GROUND_Y + 10, 16, 4);
+      }
+      // acera
+      ctx.fillStyle = "rgba(200,200,200,0.3)";
+      ctx.fillRect(0, GROUND_Y, GAME_W, 6);
+    } else if (idx === 1) {
+      var sp2 = 18, of2 = scrollX % sp2;
+      for (var x2 = -sp2; x2 < GAME_W + sp2; x2 += sp2) {
+        var bx = x2 - of2;
+        ctx.beginPath(); ctx.moveTo(bx, GROUND_Y); ctx.lineTo(bx + sp2 / 2, GROUND_Y - 8); ctx.lineTo(bx + sp2, GROUND_Y); ctx.closePath(); ctx.fill();
+      }
+    } else if (idx === 4) {
+      // Chan Chan: suelo arenoso con craquelado
+      var sp4 = 22, of4 = scrollX % sp4;
+      ctx.strokeStyle = theme.groundLineColor; ctx.lineWidth = 1;
+      for (var x4 = -sp4; x4 < GAME_W + sp4; x4 += sp4) {
+        ctx.beginPath(); ctx.moveTo(x4 - of4, GROUND_Y + 5); ctx.lineTo(x4 - of4 + sp4 * 0.6, GROUND_Y + 15); ctx.stroke();
+      }
+    } else if (idx === 6) {
+      // Huacas: arena con ondas
+      var sp6 = 24, of6 = scrollX % sp6;
+      ctx.strokeStyle = theme.groundLineColor; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (var x6 = -sp6; x6 < GAME_W + sp6; x6 += sp6) {
+        var bx6 = x6 - of6;
+        ctx.moveTo(bx6, GROUND_Y + 8); ctx.quadraticCurveTo(bx6 + sp6 / 2, GROUND_Y + 4, bx6 + sp6, GROUND_Y + 8);
+      }
+      ctx.stroke();
+    } else {
+      var sp3 = 18, of3 = scrollX % sp3;
+      for (var x3 = -sp3; x3 < GAME_W + sp3; x3 += sp3) {
+        ctx.fillRect(x3 - of3, GROUND_Y - 3, 10, 3);
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: GENTE LANZANDO ESCOBAS (en el suelo)
+  // ----------------------------------------------------------------
+  function drawThrowers(theme) {
+    for (var ti = 0; ti < throwers.length; ti++) {
+      var th = throwers[ti];
+      var tx = th.baseX;
+      var ty = GROUND_Y;
+      if (tx < -60 || tx > GAME_W + 60) continue;
+
+      ctx.save();
+      ctx.translate(tx, ty);
+
+      var throwing = th.throwing;
+      var armAngle = throwing ? -1.1 : -0.2;
+      var bodyColor = "#c9804a";
+      var skinColor = "#f0b87a";
+
+      // sombra
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.beginPath(); ctx.ellipse(0, 0, 12, 3, 0, 0, Math.PI * 2); ctx.fill();
+
+      // piernas
+      ctx.fillStyle = bodyColor;
+      ctx.fillRect(-5, -14, 4, 14);
+      ctx.fillRect(2, -14, 4, throwing ? 16 : 14);
+
+      // cuerpo
+      ctx.fillStyle = bodyColor;
+      ctx.fillRect(-7, -28, 14, 14);
+
+      // cabeza
+      ctx.fillStyle = skinColor;
+      ctx.beginPath(); ctx.arc(0, -32, 6, 0, Math.PI * 2); ctx.fill();
+
+      // brazo (con escoba si está lanzando)
+      ctx.save();
+      ctx.translate(7, -26);
+      ctx.rotate(armAngle);
+      ctx.fillStyle = skinColor;
+      ctx.fillRect(0, -3, 14, 4);
+
+      if (throwing) {
+        // escoba en la mano
+        ctx.strokeStyle = "#7a4a26"; ctx.lineWidth = 3; ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(28, -5); ctx.stroke();
+        // cerdas
+        ctx.fillStyle = "#d9b25a";
+        ctx.beginPath();
+        ctx.moveTo(28, -5); ctx.lineTo(36, -11); ctx.lineTo(38, -6); ctx.lineTo(32, -2); ctx.lineTo(38, 2); ctx.lineTo(36, 7); ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "#a9823c"; ctx.lineWidth = 0.8;
+        ctx.beginPath(); ctx.moveTo(30, -4); ctx.lineTo(37, -9); ctx.moveTo(30, -4); ctx.lineTo(37, -2); ctx.moveTo(30, -4); ctx.lineTo(36, 4); ctx.stroke();
+      }
+      ctx.restore();
+
+      // pelo
+      ctx.fillStyle = "#3a2010";
+      ctx.beginPath(); ctx.ellipse(0, -36, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
+
+      ctx.restore();
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: OBSTÁCULOS
+  // ----------------------------------------------------------------
+  function drawPipe(p) {
+    var theme = THEMES[p.theme];
+    var topH = p.gapY;
+    var botY = p.gapY + PIPE_GAP;
+    var botH = GROUND_Y - botY;
+
+    if (theme.obstacleType === "poste") {
+      // POSTES DESTRUIBLES - con efecto de daño si hp < 1
+      ctx.fillStyle = "#b9bdc4";
+      ctx.fillRect(p.x + PIPE_W / 2 - 4, 0, 8, topH);
+      ctx.fillRect(p.x + PIPE_W / 2 - 4, botY, 8, botH);
+      // cabezales
+      ctx.fillStyle = "#444b52";
+      ctx.fillRect(p.x + 2, Math.max(0, topH - 10), PIPE_W - 4, 10);
+      ctx.fillRect(p.x + 2, botY, PIPE_W - 4, 10);
+      ctx.fillStyle = "#ffe27a";
+      ctx.fillRect(p.x + PIPE_W / 2 - 5, Math.max(0, topH - 8), 10, 6);
+      ctx.fillRect(p.x + PIPE_W / 2 - 5, botY + 2, 10, 6);
+      // ícono de "destruible" - pequeña llama en el cabezal
+      ctx.font = "8px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("🔥", p.x + PIPE_W / 2, Math.max(12, topH - 12));
+
+    } else if (theme.obstacleType === "pico") {
+      ctx.fillStyle = theme.obstacleColor;
+      ctx.beginPath(); ctx.moveTo(p.x, 0); ctx.lineTo(p.x + PIPE_W, 0); ctx.lineTo(p.x + PIPE_W / 2, topH); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(p.x, GROUND_Y); ctx.lineTo(p.x + PIPE_W, GROUND_Y); ctx.lineTo(p.x + PIPE_W / 2, botY); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(p.x + PIPE_W / 4, 0); ctx.lineTo(p.x + PIPE_W / 2, topH); ctx.moveTo(p.x + PIPE_W / 4, GROUND_Y); ctx.lineTo(p.x + PIPE_W / 2, botY); ctx.stroke();
+
+    } else if (theme.obstacleType === "ola") {
+      ctx.fillStyle = theme.obstacleColor;
+      ctx.beginPath(); ctx.moveTo(p.x, 0); ctx.lineTo(p.x + PIPE_W, 0); ctx.lineTo(p.x + PIPE_W, Math.max(0, topH - 14)); ctx.quadraticCurveTo(p.x + PIPE_W / 2, topH + 10, p.x, Math.max(0, topH - 14)); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(p.x, GROUND_Y); ctx.lineTo(p.x + PIPE_W, GROUND_Y); ctx.lineTo(p.x + PIPE_W, botY + 14); ctx.quadraticCurveTo(p.x + PIPE_W / 2, botY - 10, p.x, botY + 14); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.75)";
+      ctx.fillRect(p.x, Math.max(0, topH - 16), PIPE_W, 4);
+      ctx.fillRect(p.x, botY + 12, PIPE_W, 4);
+
+    } else if (theme.obstacleType === "totora") {
+      ctx.fillStyle = theme.obstacleColor;
+      ctx.fillRect(p.x + PIPE_W / 2 - 4, 0, 8, topH);
+      ctx.fillRect(p.x + PIPE_W / 2 - 4, botY, 8, botH);
+      ctx.fillStyle = theme.obstacleAccentDark;
+      for (var ly = 16; ly < topH; ly += 22) ctx.fillRect(p.x + PIPE_W / 2 - 5, ly, 10, 4);
+      for (var ly2 = botY + 16; ly2 < GROUND_Y; ly2 += 22) ctx.fillRect(p.x + PIPE_W / 2 - 5, ly2, 10, 4);
+      ctx.fillStyle = theme.obstacleAccent;
+      ctx.beginPath(); ctx.moveTo(p.x + PIPE_W / 2 - 4, Math.max(0, topH - 16)); ctx.lineTo(p.x + PIPE_W / 2 + 6, Math.max(0, topH - 13)); ctx.lineTo(p.x + PIPE_W / 2 - 4, Math.max(0, topH - 24)); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(p.x + PIPE_W / 2 - 4, botY + 16); ctx.lineTo(p.x + PIPE_W / 2 + 6, botY + 19); ctx.lineTo(p.x + PIPE_W / 2 - 4, botY + 24); ctx.closePath(); ctx.fill();
+
+    } else if (theme.obstacleType === "adobe") {
+      // Chan Chan style con textura de ladrillo pixel art
+      ctx.fillStyle = theme.obstacleColor;
+      ctx.fillRect(p.x, 0, PIPE_W, topH);
+      ctx.fillRect(p.x, botY, PIPE_W, botH);
+      // textura ladrillo
+      ctx.fillStyle = theme.obstacleAccentDark;
+      for (var by = topH - 6; by > 0; by -= 9) {
+        var rof = (Math.floor(by / 9) % 2) * 6;
+        ctx.fillRect(p.x + rof, by, 12, 7);
+        ctx.fillRect(p.x + rof + 14, by, 12, 7);
+      }
+      for (var by2 = botY + 2; by2 < GROUND_Y; by2 += 9) {
+        var rof2 = (Math.floor(by2 / 9) % 2) * 6;
+        ctx.fillRect(p.x + rof2, by2, 12, 7);
+        ctx.fillRect(p.x + rof2 + 14, by2, 12, 7);
+      }
+      // almenas
+      ctx.fillStyle = theme.obstacleAccent;
+      for (var nz = 0; nz < 3; nz++) {
+        ctx.fillRect(p.x + nz * 11 + 1, Math.max(0, topH - 7), 8, 7);
+        ctx.fillRect(p.x + nz * 11 + 1, botY, 8, 7);
+      }
+
+    } else if (theme.obstacleType === "colonial") {
+      ctx.fillStyle = theme.obstacleColor;
+      ctx.fillRect(p.x + PIPE_W / 2 - 3, 0, 6, topH);
+      ctx.fillRect(p.x + PIPE_W / 2 - 3, botY, 6, botH);
+      ctx.fillStyle = theme.obstacleAccentDark;
+      ctx.fillRect(p.x + PIPE_W / 2 - 8, Math.max(0, topH - 13), 16, 13);
+      ctx.fillRect(p.x + PIPE_W / 2 - 8, botY, 16, 13);
+      ctx.fillStyle = theme.obstacleAccent;
+      ctx.fillRect(p.x + PIPE_W / 2 - 4, Math.max(0, topH - 9), 8, 7);
+      ctx.fillRect(p.x + PIPE_W / 2 - 4, botY + 4, 8, 7);
+
+    } else { // huaca: pirámide escalonada pixel art
+      ctx.fillStyle = theme.obstacleColor;
+      var steps = 4;
+      var stepH = topH / steps;
+      for (var st = 0; st < steps; st++) {
+        var sw = PIPE_W - st * 6;
+        ctx.fillRect(p.x + (PIPE_W - sw) / 2, st * stepH, sw, stepH + 1);
+        ctx.fillStyle = theme.obstacleAccentDark;
+        ctx.fillRect(p.x + (PIPE_W - sw) / 2, st * stepH, sw, 2);
+        ctx.fillStyle = theme.obstacleColor;
+      }
+      var stepHB = botH / steps;
+      for (var st2 = 0; st2 < steps; st2++) {
+        var sw2 = PIPE_W - (steps - 1 - st2) * 6;
+        ctx.fillRect(p.x + (PIPE_W - sw2) / 2, botY + st2 * stepHB, sw2, stepHB + 1);
+        ctx.fillStyle = theme.obstacleAccentDark;
+        ctx.fillRect(p.x + (PIPE_W - sw2) / 2, botY + st2 * stepHB, sw2, 2);
+        ctx.fillStyle = theme.obstacleColor;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: ESCOBA
+  // ----------------------------------------------------------------
+  function drawEscoba(es) {
+    ctx.save();
+    ctx.translate(es.x, es.y);
+    ctx.rotate(-0.12);
+    ctx.strokeStyle = "#7a4a26"; ctx.lineWidth = 4; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(4, 0); ctx.lineTo(-22, 0); ctx.stroke();
+    ctx.fillStyle = "#5c361a";
+    ctx.beginPath(); ctx.arc(-22, 0, 2.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#3a2418";
+    ctx.fillRect(1, -3.5, 5, 7);
+    ctx.fillStyle = "#d9b25a"; ctx.strokeStyle = "#a9823c"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(6, 0); ctx.lineTo(22, -11); ctx.lineTo(25, -7); ctx.lineTo(17, 0); ctx.lineTo(25, 7); ctx.lineTo(22, 11); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = "#bb9249"; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(23, -8); ctx.moveTo(9, 0); ctx.lineTo(24, 0); ctx.moveTo(9, 0); ctx.lineTo(23, 8); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: BOLA DE FUEGO
+  // ----------------------------------------------------------------
+  function drawFireball(f) {
+    ctx.save();
+    ctx.translate(f.x, f.y);
+    var g = ctx.createRadialGradient(0, 0, 1, 0, 0, 8);
+    g.addColorStop(0, "#fff6c8"); g.addColorStop(0.5, "#ffb347"); g.addColorStop(1, "#d6431f");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,140,40,0.65)";
+    ctx.beginPath(); ctx.moveTo(-6, -3); ctx.lineTo(-17, -1); ctx.lineTo(-6, 2); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-6, 3); ctx.lineTo(-15, 6); ctx.lineTo(-5, 5); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: EXPLOSIÓN
+  // ----------------------------------------------------------------
+  function drawPuff(p) {
+    var t = p.t / (p.big ? 0.4 : 0.35);
+    var maxR = p.big ? 22 : 16;
+    var r = 4 + t * maxR;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, 1 - t);
+    ctx.strokeStyle = p.big ? "#ff8844" : "#ffb347";
+    ctx.lineWidth = p.big ? 3 : 2;
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = p.big ? "#ff6622" : "#ffe27a";
+    for (var k = 0; k < 6; k++) {
+      var ang = (k / 6) * Math.PI * 2 + t * 3;
+      ctx.beginPath();
+      ctx.arc(p.x + Math.cos(ang) * r * 0.7, p.y + Math.sin(ang) * r * 0.7, p.big ? 3 : 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: CHATO EL PERRO DRAGÓN
+  // ----------------------------------------------------------------
+  function roundRectPath(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawChato() {
+    ctx.save();
+    ctx.translate(chato.x, chato.y);
+    ctx.rotate(chato.rot);
+
+    // cola
+    ctx.strokeStyle = "#c9974f"; ctx.lineWidth = 4; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(-9, 2); ctx.quadraticCurveTo(-21, 9, -26, 2); ctx.stroke();
+    ctx.fillStyle = "#9c3a26";
+    ctx.beginPath(); ctx.moveTo(-26, 2); ctx.lineTo(-32, -3); ctx.lineTo(-24, 6); ctx.closePath(); ctx.fill();
+
+    // ala
+    var wingUp = Math.sin(flapPhase) > 0;
+    var wg = ctx.createLinearGradient(-1, 0, -29, wingUp ? -10 : 10);
+    wg.addColorStop(0, "#f3a04e"); wg.addColorStop(1, "#b53a26");
+    ctx.fillStyle = wg; ctx.strokeStyle = "#7a2419"; ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    if (wingUp) {
+      ctx.moveTo(-1, -2); ctx.lineTo(-19, -23); ctx.quadraticCurveTo(-9, -13, -29, -10); ctx.quadraticCurveTo(-11, -4, -22, 3); ctx.lineTo(-2, 4);
+    } else {
+      ctx.moveTo(-1, 2); ctx.lineTo(-19, 23); ctx.quadraticCurveTo(-9, 13, -29, 10); ctx.quadraticCurveTo(-11, 4, -22, -3); ctx.lineTo(-2, -4);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    // cuerpo
+    ctx.fillStyle = "#e4ba6e";
+    ctx.beginPath(); ctx.ellipse(0, 0, 13, 10, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fcedc8";
+    ctx.beginPath(); ctx.ellipse(-1, 5, 8, 5, 0, 0, Math.PI * 2); ctx.fill();
+
+    // escamas
+    ctx.fillStyle = "#9c3a26";
+    for (var i = 0; i < 3; i++) {
+      ctx.beginPath(); ctx.moveTo(-7 + i * 6, -8); ctx.lineTo(-4 + i * 6, -15); ctx.lineTo(-1 + i * 6, -8); ctx.closePath(); ctx.fill();
+    }
+
+    // oreja
+    ctx.fillStyle = "#c9974f";
+    ctx.beginPath(); ctx.ellipse(4, -1, 3.6, 7, 1.05, 0, Math.PI * 2); ctx.fill();
+
+    // cuernos
+    ctx.strokeStyle = "#ecdfb4"; ctx.lineWidth = 2.3; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(3, -9); ctx.quadraticCurveTo(3, -16, 8, -17); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(7, -8); ctx.quadraticCurveTo(8, -15, 13, -15); ctx.stroke();
+
+    // hocico
+    ctx.fillStyle = "#e4ba6e";
+    ctx.beginPath(); ctx.ellipse(13, 3, 5, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#231a12";
+    ctx.beginPath(); ctx.arc(17, 2, 1.2, 0, Math.PI * 2); ctx.fill();
+
+    // ojo
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(7, -2, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#3a2414";
+    ctx.beginPath(); ctx.arc(8, -2, 1.4, 0, Math.PI * 2); ctx.fill();
+
+    // pata
+    ctx.fillStyle = "#fcedc8";
+    ctx.beginPath(); ctx.ellipse(9, 9, 3, 2, 0, 0, Math.PI * 2); ctx.fill();
+
+    // fuego del hocico
+    if (chato.fireBreath > 0) {
+      var ft = chato.fireBreath / FIRE_BREATH_TIME;
+      ctx.globalAlpha = ft;
+      var fg = ctx.createRadialGradient(20, 2, 1, 20, 2, 9);
+      fg.addColorStop(0, "#fff6c8"); fg.addColorStop(0.55, "#ffb347"); fg.addColorStop(1, "rgba(214,67,31,0)");
+      ctx.fillStyle = fg;
+      ctx.beginPath(); ctx.ellipse(22 + (1 - ft) * 6, 2, 8 * ft + 3, 5 * ft + 2, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+
+    // etiqueta
+    ctx.font = "bold 8px Trebuchet MS, sans-serif";
+    ctx.textAlign = "center";
+    var text = "Chato";
+    var tw = ctx.measureText(text).width;
+    var tagY = chato.y - 26;
+    ctx.fillStyle = "rgba(20,20,30,0.55)";
+    roundRectPath(chato.x - tw / 2 - 4, tagY - 9, tw + 8, 13, 4);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(text, chato.x, tagY);
+  }
+
+  // ----------------------------------------------------------------
+  // DIBUJO: INTERFAZ
+  // ----------------------------------------------------------------
+  function drawHUD() {
+    ctx.textAlign = "center";
+    ctx.font = "bold 20px Trebuchet MS, sans-serif";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(0,0,0,0.4)";
+    ctx.strokeText(String(score), GAME_W / 2, 28);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(String(score), GAME_W / 2, 28);
+
+    ctx.textAlign = "left";
+    ctx.font = "9px Trebuchet MS, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillText(THEMES[scenarioIndex].name, 8, 14);
+
+    // indicador de cuántos niveles faltan para cambio de escenario
+    var lvlsToChange = SCENARIO_LEVELS - (score % SCENARIO_LEVELS);
+    if (lvlsToChange <= 2) {
+      ctx.fillStyle = "rgba(255,230,100,0.9)";
+      ctx.font = "8px Trebuchet MS, sans-serif";
+      ctx.textAlign = "right";
+      ctx.fillText("Cambio en " + lvlsToChange + "...", GAME_W - 8, 14);
+    }
+
+    // indicador de cooldown de fuego
+    if (fireCooldown > 0) {
+      var barW = 40, barH = 5;
+      var barX = GAME_W - 48, barY = GAME_H - 22;
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.fillStyle = "#ff6633";
+      ctx.fillRect(barX, barY, barW * (1 - fireCooldown / FIRE_COOLDOWN_MAX), barH);
+    }
+  }
+
+  function drawPanel(lines, y0) {
+    ctx.textAlign = "center";
+    var ty = y0;
+    for (var i = 0; i < lines.length; i++) {
+      ctx.font = lines[i].font;
+      ctx.fillStyle = lines[i].color;
+      ctx.fillText(lines[i].text, GAME_W / 2, ty);
+      ty += lines[i].gap;
+    }
+  }
+
+  function drawStartScreen() {
+    ctx.fillStyle = "rgba(8,8,18,0.62)";
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+    drawPanel([
+      { text: "Chato el Perro Dragón", font: "bold 22px Trebuchet MS, sans-serif", color: "#ffffff", gap: 26 },
+      { text: "Toca SALTAR para volar y esquivar", font: "11px Trebuchet MS, sans-serif", color: "#ffffff", gap: 16 },
+      { text: "🔥 FUEGO destruye escobas y postes", font: "11px Trebuchet MS, sans-serif", color: "#ffd27a", gap: 16 },
+      { text: "⬆ Rebotas en el techo — ⬇ suelo = derrota", font: "10px Trebuchet MS, sans-serif", color: "#aaddff", gap: 20 },
+      { text: "Escenario cambia cada 7 niveles", font: "10px Trebuchet MS, sans-serif", color: "rgba(255,255,255,0.7)", gap: 18 },
+      { text: "Mejor puntaje: " + best, font: "11px Trebuchet MS, sans-serif", color: "rgba(255,255,255,0.7)", gap: 0 }
+    ], GAME_H / 2 - 72);
+  }
+
+  function drawGameOverScreen() {
+    ctx.fillStyle = "rgba(8,8,18,0.65)";
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+    drawPanel([
+      { text: "¡Choque!", font: "bold 24px Trebuchet MS, sans-serif", color: "#ff6f59", gap: 28 },
+      { text: "Puntaje: " + score, font: "bold 16px Trebuchet MS, sans-serif", color: "#ffffff", gap: 20 },
+      { text: "Mejor puntaje: " + best, font: "12px Trebuchet MS, sans-serif", color: "rgba(255,255,255,0.8)", gap: 28 },
+      { text: "Toca para reintentar", font: "12px Trebuchet MS, sans-serif", color: "#ffe27a", gap: 0 }
+    ], GAME_H / 2 - 52);
+  }
+
+  // ----------------------------------------------------------------
+  // BUCLE PRINCIPAL
+  // ----------------------------------------------------------------
+  function render() {
+    var theme = THEMES[scenarioIndex];
+    drawSky(theme);
+    drawDecor(theme);
+    drawGround(theme);
+    drawThrowers(theme);
+
+    for (var i = 0; i < pipes.length; i++) drawPipe(pipes[i]);
+    for (var j = 0; j < escobas.length; j++) drawEscoba(escobas[j]);
+    for (var pf = 0; pf < puffs.length; pf++) drawPuff(puffs[pf]);
+
+    drawChato();
+
+    for (var fb = 0; fb < fireballs.length; fb++) drawFireball(fireballs[fb]);
+
+    drawHUD();
+
+    if (flashAlpha > 0) {
+      ctx.fillStyle = "rgba(255,255,255," + flashAlpha + ")";
+      ctx.fillRect(0, 0, GAME_W, GAME_H);
+      flashAlpha = Math.max(0, flashAlpha - 0.06);
+    }
+
+    if (state === "start") drawStartScreen();
+    else if (state === "gameover") drawGameOverScreen();
+  }
+
+  var lastTime = performance.now();
+  function loop(now) {
+    var dt = (now - lastTime) / 1000;
+    lastTime = now;
+    if (dt > 0.05) dt = 0.05;
+    if (state === "playing") update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+  render();
+})();
+</script>
+
+<!-- Botón de instalación PWA (solo aparece si el navegador lo soporta) -->
+<button id="installBtn" onclick="installApp()" style="
+  display:none; position:fixed; bottom:80px; left:50%; transform:translateX(-50%);
+  background:linear-gradient(180deg,#4caf50,#2e7d32); color:#fff;
+  border:none; border-radius:24px; padding:10px 24px;
+  font-size:13px; font-weight:bold; letter-spacing:1px;
+  box-shadow:0 4px 12px rgba(0,0,0,0.4); z-index:10;
+  touch-action:none;">
+  📲 INSTALAR APP
+</button>
+
+</body>
+</html>
